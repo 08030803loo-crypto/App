@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNS動画 骨格検知アプリ (HTML版)</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f4f6f9;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #333;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 16px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            text-align: center;
+            max-width: 800px;
+            width: 100%;
+        }
+        h1 {
+            margin-top: 0;
+            font-size: 24px;
+        }
+        .upload-area {
+            border: 2px dashed #007bff;
+            padding: 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            background: #f8f9fa;
+            transition: background 0.3s;
+        }
+        .upload-area:hover {
+            background: #e9ecef;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+        }
+        #output_canvas {
+            max-width: 100%;
+            max-height: 70vh;
+            border-radius: 8px;
+            background-color: #000;
+            display: none;
+        }
+        #status {
+            margin-top: 10px;
+            font-weight: bold;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🏃‍♂️ SNS動画 骨格検知アプリ</h1>
+    <p>動画を選択すると、ブラウザ上でAI（MediaPipe）が骨格をリアルタイム検知します。</p>
+    
+    <div class="upload-area" onclick="document.getElementById('file_input').click()">
+        <p>ここをクリックして動画ファイル（mp4, movなど）を選択</p>
+        <input type="file" id="file_input" accept="video/*" style="display: none;">
+    </div>
+
+    <div id="status">動画をアップロードしてください</div>
+    
+    <div class="video-container">
+        <canvas id="output_canvas"></canvas>
+    </div>
+    
+    <video id="input_video" style="display:none;" playsinline loop muted></video>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const fileInput = document.getElementById('file_input');
+    const statusElement = document.getElementById('status');
+
+    let isProcessing = false;
+
+    // 1. MediaPipe Pose の初期化と設定
+    const pose = new Pose({
+        locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+    });
+
+    pose.setOptions({
+        modelComplexity: 1,       // 0: 高速, 1: 標準, 2: 高精度
+        smoothLandmarks: true,    // ジッタ（ブレ）を軽減
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    // 2. AIの検知結果が返ってきたときの描画処理
+    pose.onResults((results) => {
+        if (!isProcessing) return;
+
+        // キャンバスのサイズを動画の解像度に合わせる
+        if (canvasElement.width !== videoElement.videoWidth) {
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasElement.style.display = 'block';
+            statusElement.innerText = "骨格検知中...";
+        }
+
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        
+        // 元の動画フレームを描画
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+        
+        // 骨格（ランドマーク）が検知されていれば描画
+        if (results.poseLandmarks) {
+            // 線を描画（赤色）
+            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {
+                color: '#FF0000',
+                lineWidth: 4
+            });
+            // 点を描画（緑色）
+            drawLandmarks(canvasCtx, results.poseLandmarks, {
+                color: '#00FF00',
+                lineWidth: 2,
+                radius: 4
+            });
+        }
+        canvasCtx.restore();
+    });
+
+    // 3. 動画ループ処理
+    async function renderLoop() {
+        if (!videoElement.paused && !videoElement.ended && isProcessing) {
+            await pose.send({ image: videoElement });
+            // 次のフレームを要求
+            requestAnimationFrame(renderLoop);
+        }
+    }
+
+    // 4. ファイルがアップロードされたときの処理
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        statusElement.innerText = "動画を読み込み中...";
+        isProcessing = false;
+        
+        // 動画のオブジェクトURLを生成してビデオ要素にセット
+        const fileURL = URL.createObjectURL(file);
+        videoElement.src = fileURL;
+        videoElement.load();
+        
+        videoElement.onloadeddata = () => {
+            isProcessing = true;
+            videoElement.play();
+            renderLoop();
+        };
+    });
+</script>
+
+</body>
+</html>
