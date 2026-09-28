@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ダンスと音楽の同期・可視化プロトタイプ (部位選択版)</title>
+    <!-- Tailwind CSS for UI styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js for graph rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-6">
+    <div class="max-w-4xl mx-auto space-y-6">
+        <!-- Header -->
+        <header class="text-center space-y-2">
+            <h1 class="text-3xl font-bold text-blue-400">ダンスと音楽の同期・可視化プロトタイプ</h1>
+            <p class="text-gray-400">分析したい身体の部位を選んで、音楽のビートとの同期をグラフ化します。</p>
+        </header>
+
+        <!-- Upload & Settings Section -->
+        <div class="bg-gray-800 p-6 rounded-xl shadow-lg space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">1. ダンス動画をアップロード (.mp4 など)</label>
+                <input type="file" id="videoInput" accept="video/mp4,video/mov,video/avi" class="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">2. 分析する身体の部位を選択</label>
+                <select id="bodyPartSelect" class="block w-full bg-gray-700 border border-gray-600 rounded-lg p-2.5 text-gray-100 focus:ring-blue-500 focus:border-blue-500">
+                    <option value="16">右手首 (Right Wrist)</option>
+                    <option value="15">左手首 (Left Wrist)</option>
+                    <option value="28">右足首 (Right Ankle)</option>
+                    <option value="27">左足首 (Left Ankle)</option>
+                    <option value="24">右腰 (Right Hip)</option>
+                    <option value="0">頭 / 鼻 (Nose)</option>
+                </select>
+            </div>
+            
+            <div class="flex justify-center">
+                <video id="videoElement" controls class="max-h-80 rounded-lg hidden"></video>
+            </div>
+
+            <button id="startButton" disabled class="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-bold rounded-lg transition duration-200 cursor-pointer disabled:cursor-not-allowed">
+                解析を開始する
+            </button>
+            <div id="statusText" class="text-center text-sm text-yellow-400 font-medium"></div>
+        </div>
+
+        <!-- Graph Section -->
+        <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
+            <h2 class="text-xl font-semibold mb-4 text-gray-200">解析結果グラフ</h2>
+            <div class="relative h-72 w-full">
+                <canvas id="resultChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- MediaPipe & Logic Script -->
+    <script type="module">
+        import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+        let poseLandmarker = undefined;
+        let videoFileUrl = null;
+        const videoInput = document.getElementById("videoInput");
+        const videoElement = document.getElementById("videoElement");
+        const startButton = document.getElementById("startButton");
+        const statusText = document.getElementById("statusText");
+        const bodyPartSelect = document.getElementById("bodyPartSelect");
+        let chartInstance = null;
+
+        // 1. MediaPipeの初期化
+        async function initializeMediaPipe() {
+            statusText.innerText = "AIモデルを読み込んでいます...";
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+            );
+            poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numPoses: 1
+            });
+            statusText.innerText = "準備完了しました。動画をアップロードしてください。";
+            startButton.disabled = false;
+        }
+        initializeMediaPipe();
+
+        // 動画ファイル選択時
+        videoInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                videoFileUrl = URL.createObjectURL(file);
+                videoElement.src = videoFileUrl;
+                videoElement.classList.remove("hidden");
+                statusText.innerText = "動画が読み込まれました。部位を選んで「解析を開始する」を押してください。";
+            }
+        });
+
+        // 解析ボタンクリック
+        startButton.addEventListener("click", async () => {
+            if (!poseLandmarker || !videoElement.src) return;
+
+            startButton.disabled = true;
+            videoInput.disabled = true;
+            bodyPartSelect.disabled = true;
+            statusText.innerText = "解析中... 動画を再生してデータを抽出しています。";
+
+            const selectedLandmarkIndex = parseInt(bodyPartSelect.value);
+            const selectedPartName = bodyPartSelect.options[bodyPartSelect.selectedIndex].text;
+
+            // 音声ビート解析
+            const beatTimes = await analyzeAudioBeats(videoElement.src);
+
+            // 動画の骨格解析ループの設定
+            videoElement.currentTime = 0;
+            videoElement.muted = true;
+            
+            await videoElement.play();
+
+            let frameTimes = [];
+            let partSpeeds = [];
+            let prevPos = null;
+            let prevTime = 0;
+
+            return new Promise((resolve) => {
+                async function processFrame() {
+                    if (videoElement.ended || videoElement.paused) {
+                        videoElement.pause();
+                        videoElement.muted = false;
+                        statusText.innerText = "解析が完了しました！";
+                        startButton.disabled = false;
+                        videoInput.disabled = false;
+                        bodyPartSelect.disabled = false;
+                        renderChart(frameTimes, partSpeeds, beatTimes, selectedPartName);
+                        resolve();
+                        return;
+                    }
+
+                    const currentTime = videoElement.currentTime;
+                    const timestampMs = Math.round(currentTime * 1000);
+
+                    const results = poseLandmarker.detectForVideo(videoElement, timestampMs);
+
+                    let speed = 0;
+                    if (results.landmarks && results.landmarks.length > 0) {
+                        const landmark = results.landmarks[0][selectedLandmarkIndex];
+                        const currPos = { x: landmark.x, y: landmark.y };
+
+                        if (prevPos !== null) {
+                            const dt = currentTime - prevTime;
+                            if (dt > 0) {
+                                const dist = Math.hypot(currPos.x - prevPos.x, currPos.y - prevPos.y);
+                                speed = dist / dt;
+                            }
+                        }
+                        prevPos = currPos;
+                        prevTime = currentTime;
+                    }
+
+                    frameTimes.push(Number(currentTime.toFixed(2)));
+                    partSpeeds.push(Number(speed.toFixed(2)));
+
+                    requestAnimationFrame(processFrame);
+                }
+
+                requestAnimationFrame(processFrame);
+            });
+        });
+
+        // Web Audio APIを用いたビート検出
+        async function analyzeAudioBeats(url) {
+            try {
+                const response = await fetch(url);
+                const arrayBuffer = await response.arrayBuffer();
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                
+                const channelData = audioBuffer.getChannelData(0);
+                const sampleRate = audioBuffer.sampleRate;
+                const hopSize = 1024;
+                let beatTimes = [];
+                let prevEnergy = 0;
+
+                for (let i = 0; i < channelData.length; i += hopSize) {
+                    let sum = 0;
+                    for (let j = 0; j < hopSize && (i + j) < channelData.length; j++) {
+                        sum += channelData[i + j] * channelData[i + j];
+                    }
+                    let energy = Math.sqrt(sum / hopSize);
+                    let time = i / sampleRate;
+
+                    if (energy > prevEnergy * 1.5 && energy > 0.05) {
+                        beatTimes.push(Number(time.toFixed(2)));
+                    }
+                    prevEnergy = energy;
+                }
+                return beatTimes;
+            } catch (e) {
+                console.error("音声解析エラー:", e);
+                return [];
+            }
+        }
+
+        // Chart.jsによるグラフ描画
+        function renderChart(times, speeds, beats, partName) {
+            const ctx = document.getElementById('resultChart').getContext('2d');
+            
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            const maxSpeed = speeds.length > 0 ? Math.max(...speeds) : 1;
+
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: times,
+                    datasets: [
+                        {
+                            label: `${partName} の速度 (Speed)`,
+                            data: speeds,
+                            borderColor: 'rgba(59, 130, 246, 0.8)',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            tension: 0.2,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: '音楽のビート (Beat)',
+                            data: times.map(t => beats.includes(t) ? maxSpeed : null),
+                            type: 'scatter',
+                            backgroundColor: 'rgba(239, 68, 68, 0.9)',
+                            pointRadius: 6,
+                            pointStyle: 'triangle',
+                            yAxisID: 'y'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: { display: true, text: '時間 (秒)', color: '#9ca3af' },
+                            ticks: { color: '#9ca3af' },
+                            grid: { color: 'rgba(75, 85, 99, 0.2)' }
+                        },
+                        y: {
+                            title: { display: true, text: '速度 / ビート', color: '#9ca3af' },
+                            ticks: { color: '#9ca3af' },
+                            grid: { color: 'rgba(75, 85, 99, 0.2)' }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#f3f4f6' } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
